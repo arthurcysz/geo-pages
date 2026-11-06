@@ -711,24 +711,26 @@ const promotionCanVerify=()=>['owner','approver'].includes(A.data?.member?.role)
 const promotionRequest=()=>crypto.randomUUID();
 const promotionText=(value,fallback='')=>esc(value??fallback);
 const promotionScope=()=>A.workspace+':'+(A.data?.member?.id||A.session?.actor||'');
-const promotionDraftKey=form=>'promotion-draft:'+promotionScope()+':'+form.dataset.promotionForm;
+const promotionDraftKey=form=>'promotion-draft:'+promotionScope()+':'+(form.dataset.promotionForm||form.dataset.promotionWorkflow);
+const promotionDraftFields=form=>[...form.querySelectorAll('[name]')].filter(el=>!['file','checkbox','radio'].includes(el.type));
+function promotionReadDraft(form){try{return JSON.parse(sessionStorage.getItem(promotionDraftKey(form))||'null')}catch{return null}}
 function promotionRestoreDrafts(){
- for(const form of document.querySelectorAll('[data-promotion-form]')){
-  let saved;try{saved=JSON.parse(sessionStorage.getItem(promotionDraftKey(form))||'null')}catch{}
+ for(const form of document.querySelectorAll('[data-promotion-form], [data-promotion-workflow]')){
+  const saved=promotionReadDraft(form);
   if(!saved)continue;
   if(String(saved.revision)!==form.dataset.revision){
    form.querySelector('[data-save-state]').textContent=T('后台已有新版本。保留旧输入，请复制后核对，不自动覆盖。','A newer version exists. Recover your previous text before editing; it will not overwrite the new version.');
    const details=document.createElement('details'),summary=document.createElement('summary'),pre=document.createElement('pre');
    summary.textContent=T('查看未保存的旧输入','Recover previous unsaved text');pre.textContent=JSON.stringify(saved.values,null,2);details.append(summary,pre);form.prepend(details);continue;
   }
-  for(const [name,value] of Object.entries(saved.values)){const el=form.elements[name];if(el&&el.type!=='file')el.value=value;}
+  for(const el of promotionDraftFields(form)){if(Object.hasOwn(saved.values,el.name))el.value=saved.values[el.name];}
   form.querySelector('[data-save-state]').textContent=T('已恢复当前标签页的未保存输入','Unsaved text recovered in this tab');
  }
 }
 document.addEventListener('input',e=>{
- const form=e.target.closest('[data-promotion-form]');if(!form||e.target.type==='file')return;
- const values=Object.fromEntries(new FormData(form));
- try{sessionStorage.setItem(promotionDraftKey(form),JSON.stringify({revision:form.dataset.revision,values}));form.querySelector('[data-save-state]').textContent=T('输入暂存在当前标签页，尚未保存到后台','Text kept in this tab; not yet saved to the server')}catch{form.querySelector('[data-save-state]').textContent=T('暂存失败，请先保存再离开','Tab storage unavailable. Save before leaving')}
+ const form=e.target.closest('[data-promotion-form], [data-promotion-workflow]');if(!form||e.target.type==='file')return;
+ const values=Object.fromEntries(promotionDraftFields(form).map(el=>[el.name,el.value]));
+ try{const saved=promotionReadDraft(form);sessionStorage.setItem(promotionDraftKey(form),JSON.stringify({revision:form.dataset.revision,values,requestKey:saved?.revision===form.dataset.revision?saved.requestKey:undefined}));form.querySelector('[data-save-state]').textContent=T('输入暂存在当前标签页，尚未保存到后台','Text kept in this tab; not yet saved to the server')}catch{form.querySelector('[data-save-state]').textContent=T('暂存失败，请先保存再离开','Tab storage unavailable. Save before leaving')}
 });
 
 function promotionHome(){
@@ -753,6 +755,7 @@ function promotionDetail(c){
  <section class="promotion-home">
  <div class="row promotion-toolbar">${badge(c.purpose==='maintenance'?T('维护说明 · 不承诺可购','Maintenance · no availability claim'):T('购买推广 · 需核对交易条件','Purchase · checked trading conditions'),'purple')}${promotionCanWrite()?button(T('用已有内容 / 素材','Use existing content / assets'),'promotion-add',c.id,'primary small')+button(T('制作新内容','Create content'),'promotion-generate',c.id,'small'):''}${promotionCanWrite()?button(T('关联 GEO 证据','Link GEO evidence'),'promotion-link',c.id,'small'):''}</div>
  ${jobs.length?`<details class="promotion-card"><summary>${T('生成任务与异常','Generation tasks and blockers')} (${jobs.length})</summary>${agentJobs(jobs)}</details>`:''}
+ ${promotionProductionDetails(c)}
  <div class="promotion-detail-layout"><aside class="card promotion-card"><h3>${T('渠道内容','Channel content')}</h3>${contents.map(x=>`<button type="button" class="promotion-content-link ${x.id===a?.id?'is-active':''}" data-act="promotion-select" data-value="${x.id}"><strong>${promotionText(x.channel)}</strong><span>${promotionText(x.title)}</span><small>v${x.revision} · ${x.contentCheck?.revision===x.revision?T('已核对本版本','Version checked'):T('待产品负责人核对','Owner check needed')}</small></button>`).join('')||`<p>${T('选择已有内容，或准备新稿。上传素材不会发布。','Use existing content or prepare a draft. Uploading does not publish.')}</p>`}</aside><section>${a?promotionEditor(a):empty(T('准备第一个成果','Prepare the first output'),T('可以直接使用已有照片、成片和正文，不必先写官网文章。','Use existing images, finished videos and text; no website article is required.'))}</section></div>
  <section class="card promotion-card"><h3>${T('GEO 依据与复查','GEO evidence and rechecks')}</h3>${reports.map(r=>promotionObservationCard(r)+promotionDiagnosisCard(c,r.id)).join('')||`<p>${T('尚未关联观察。不显示虚构机会或趋势。','No observations linked. No invented opportunities or trends.')}</p>`}</section>
  <section class="card promotion-card"><h3>${T('交付与经营结果','Delivery and business results')}</h3>${promotionFeedbackCards(c)}<p>${T('渠道回执见各稿件；订单/购买事件尚未关联，不能以商品总销量或点赞替代本次推广订单。','Channel receipts are attached to content. Orders / purchase events are not connected here; product totals or likes are not attributed orders.')}</p></section></section>`;
@@ -811,7 +814,8 @@ function promotionDiagnosisCard(c,reportId){
  const d=c.diagnoses?.find(x=>x.reportId===reportId);
  const stale=d?.sources.some(ref=>A.data.sources.find(s=>s.id===ref.id)?.version!==ref.version);
  return `<div class="sourceblock">${d?`${T('人工确认的判断：','Owner-confirmed diagnosis: ')}${promotionText(d.classification)} · ${promotionText(d.nextAction)}<p>${promotionText(d.reason)}</p>${stale?`<div class="notice">${T('诊断依据已有变更，请重新核对。','Diagnosis evidence has changed. Recheck before acting.')}</div>`:''}`:T('尚未确认问题。不把未提及品牌直接当作内容机会。','Not diagnosed. Missing brand mentions are not automatic content opportunities.')}
- ${simpleIsOwner()?button(T('确认问题与修正目标','Confirm issue and correction target'),'promotion-diagnose',c.id+'|'+reportId,'small'):''}</div>`;
+ ${simpleIsOwner()?button(T('确认问题与修正目标','Confirm issue and correction target'),'promotion-diagnose',c.id+'|'+reportId,'small'):''}
+ ${promotionCanWrite()&&promotionCorrectionEligible(c,reportId)?button(T('建立修订记录','Create correction record'),'promotion-correction-new',c.id+'|'+reportId,'small'):''}</div>`;
 }
 function promotionDiagnose(value){
  const [id,reportId]=value.split('|'),c=promotionCampaign(id),sources=A.data.sources.filter(s=>(!s.model||s.model===c.model)&&s.text?.trim());
@@ -839,6 +843,180 @@ function promotionFeedback(id){
  ${area('definition',T('口径、限制、匿名问题或后续负责人；不含个人资料','Definition, limitations, anonymous question or owner; no personal data'),'')}
  <p>${T('手工记录不冒充自动同步。访问和点赞不作为订单；零和未接入分开。','Manual records are not automatic sync. Views or likes are not orders; zero is not missing data.')}</p>`,
  async values=>{await api('promotions/'+id+'/feedback',{...values,requestKey:key});await agentDone();});
+}
+
+// Production records stay inside the promotion, separate from generation and publication.
+const promotionVideoTask=id=>A.data?.videoTasks?.find(t=>t.id===id);
+const promotionCorrection=id=>A.data?.geoCorrections?.find(t=>t.id===id);
+function promotionRequire(ok,zh,en){if(!ok)throw Error(T(zh,en))}
+function promotionAssignees(){
+ const members=(A.data?.members||[]).filter(m=>m.active===true&&['owner','editor'].includes(m.role));
+ const self=A.data?.member;
+ if(self&&self.active!==false&&['owner','editor'].includes(self.role)&&!members.some(m=>m.id===self.id))members.push({...self,name:self.id});
+ return members;
+}
+function promotionVideoRisk(task){
+ const a=promotionContent(task.artifactId);
+ if(!a||a.revision!==task.sourceRevision)return T('原稿已改版或不可读取，不能接收或附加此成片。','The original draft changed or is unavailable; this video cannot be accepted or attached.');
+ const ref=a.distribution?{id:a.distribution.sourceArtifactId,revision:a.distribution.sourceArtifactRevision}:a.sourceArtifactId?{id:a.sourceArtifactId,revision:a.sourceRevision}:null;
+ if(ref&&promotionContent(ref.id)?.revision!==ref.revision)return T('原始 source 已改稿，不能接收此成片；请重新核对制作依据。','The source draft changed; acceptance is blocked. Recheck the production basis.');
+ const refs=task.sources||a.contentCheck?.sources||[];
+ if(refs.some(s=>A.data.sources?.find(x=>x.id===s.id)?.version!==s.version))return T('产品 source 依据已变更或不可读取，不能接收此成片。','Product source evidence changed or is unavailable; acceptance is blocked.');
+ return '';
+}
+function promotionVideoPermissions(task){
+ const write=promotionCanWrite(),self=A.data?.member?.id;
+ return {submit:write&&(A.data.member.role==='owner'||task.assigneeId===self)&&['awaiting_media','ready_for_review','rejected'].includes(task.status)&&!promotionVideoRisk(task),
+  review:promotionCanVerify()&&task.status==='ready_for_review'&&promotionDifferentReviewer(task.result?.submittedBy),
+  attach:write&&task.status==='accepted'&&!promotionVideoRisk(task)};
+}
+const promotionDifferentReviewer=author=>!A.data.settings?.find(s=>s.id==='main')?.requireDifferentReviewer||A.data.member.id!==author;
+function promotionCorrectionEligible(c,reportId){
+ const d=c?.diagnoses?.find(x=>x.reportId===reportId);
+ return !!d?.confirmedBy&&!!d.confirmedAt&&['incorrect_fact','information_gap','third_party_issue'].includes(d.classification)&&['revise_existing','create_explanation'].includes(d.nextAction)&&!!d.sources?.length&&!d.sources.some(s=>A.data.sources?.find(x=>x.id===s.id)?.version!==s.version);
+}
+function promotionPublishedActions(record){
+ return (A.data.actions||[]).filter(a=>a.package?.artifactId===record.artifactId&&a.package.artifactRevision===record.artifactRevision&&a.status==='completed'&&(!a.package.privacy||['public','PUBLIC_TO_EVERYONE'].includes(a.package.privacy))&&!['uploaded_private','uploaded_unlisted'].includes(a.result?.state)&&(!a.result?.visibility||['public','PUBLIC_TO_EVERYONE'].includes(a.result.visibility))&&promotionDifferentReviewer(a.author)&&(A.data.deliveries||[]).some(d=>d.actionId===a.id&&d.payloadHash===a.payloadHash&&(!d.visibility||['public','PUBLIC_TO_EVERYONE'].includes(d.visibility))&&!!d.url&&((d.kind==='manual_verification'&&d.outcome==='published'&&d.remoteChecked===true&&d.evidence?.trim())||(d.kind==='api_result'&&d.state==='published'))));
+}
+function promotionRecheckReports(record){
+ const before=record.originalReport?.observation||A.data.reports?.find(r=>r.id===record.reportId)?.observation,checked=Date.parse(record.verification?.checkedAt);
+ return (A.data.reports||[]).filter(r=>r.kind==='geo_observation'&&r.id!==record.reportId&&r.observation?.previousReportId===record.reportId&&before&&['model','market','language','question','method','platform','conditions'].every(k=>r.observation[k]===before[k])&&Number.isFinite(checked)&&Date.parse(r.observation.observedAt)>=checked&&Date.parse(r.observation.observedAt)>Date.parse(before.observedAt)&&Date.parse(r.observation.observedAt)<=Date.now());
+}
+function promotionProductionDetails(c){
+ const tasks=(A.data.videoTasks||[]).filter(t=>t.campaignId===c.id),corrections=(A.data.geoCorrections||[]).filter(t=>t.campaignId===c.id);
+ if(!tasks.length&&!corrections.length&&!promotionCanWrite())return '';
+ return `<details class="card promotion-card promotion-production"><summary>${T('视频制作任务与 GEO 修订记录','Video production tasks and GEO correction records')} (${tasks.length+corrections.length})</summary>
+ <p>${T('由负责人拍摄 / 剪辑 / 提供成片，不自动生成视频；接收成片不等于批准营销稿或发布。','A producer films / edits / supplies the finished video. No automatic video generation; accepting a video is not copy approval or publication.')}</p>
+ ${promotionCanWrite()?button(T('建立视频制作任务','Create video production task'),'promotion-video-new',c.id,'small'):''}
+ ${tasks.map(promotionVideoCard).join('')}
+ <h3>${T('GEO：修订 → 人工核验 → 真实观察复查','GEO: correction → human verification → observed recheck')}</h3>
+ <p>${T('从下方已确认诊断建立修订记录。核验与复查只记录人工证据，不主动访问网络，也不自动判断 AI 改善或修订因果。','Create a correction from a confirmed diagnosis below. Verification and rechecks record human evidence; no proactive network access, automatic AI improvement score or causal attribution.')}</p>
+ ${corrections.map(promotionCorrectionCard).join('')}</details>`;
+}
+function promotionVideoCard(task){
+ const p=promotionVideoPermissions(task),risk=promotionVideoRisk(task),labels={awaiting_media:T('等待制作者提交成片','Awaiting finished video'),ready_for_review:T('待成片审核','Ready for video review'),accepted:T('成片已接收（非营销批准）','Video accepted (not copy approval)'),rejected:T('退回制作 / 可重新提交','Rejected / may resubmit')};
+ return `<details class="sourceblock promotion-production-record"><summary>${promotionText(labels[task.status]||task.status)} · ${promotionText(task.id)}</summary>
+ <p>${promotionText(task.sourceSnapshot?.title||promotionContent(task.artifactId)?.title||task.artifactId)} · v${promotionText(task.sourceRevision)} · ${T('负责人','Assignee')}: ${promotionText((A.data.members||[]).find(m=>m.id===task.assigneeId)?.name||task.assigneeId)}</p>
+ <pre>${promotionText(task.brief)}</pre>${risk?`<div class="notice" role="status">${promotionText(risk)}</div>`:''}
+ ${task.result?`<p>${T('提交成片','Submitted video')}: ${promotionText(task.result.mediaId)} · ${promotionText(task.result.type)} · ${promotionText(task.result.size)} bytes<br>SHA-256 ${promotionText(task.result.sha256)}</p><pre>${promotionText(task.result.note)}</pre>`:''}
+ ${task.review?`<p>${T('成片审核记录','Video review record')}: ${promotionText(task.review.decision)} · ${promotionText(task.review.note)}</p>`:''}
+ <div class="row promotion-toolbar">${task.result?button(T('查看提交成片','Inspect submitted video'),'promotion-video-inspect',task.id,'small'):''}${p.submit?button(T('提交已有成片','Submit finished video'),'promotion-video-submit',task.id,'small'):''}${p.review?button(T('审核成片','Review finished video'),'promotion-video-review',task.id,'small'):''}${p.attach?button(T('将已接收成片附到原稿','Attach accepted video to draft'),'promotion-video-attach',task.id,'small'):''}</div></details>`;
+}
+function promotionCorrectionCard(record){
+ const labels={awaiting_verification:T('1 / 3 已建立修订，待人工核验','1 / 3 Correction recorded; awaiting human verification'),awaiting_recheck:T('2 / 3 已人工核验，待新观察复查','2 / 3 Human-verified; awaiting a new observation'),rechecked:T('3 / 3 已关联真实复查，不代表改善','3 / 3 Actual recheck linked; not proof of improvement')};
+ const v=record.verification,r=record.recheck;
+ return `<details class="sourceblock promotion-production-record"><summary>${promotionText(labels[record.status]||record.status)} · ${promotionText(record.id)}</summary>
+ <p>${T('原观察 / 修订稿','Original observation / correction draft')}: ${promotionText(record.reportId)} / ${promotionText(record.artifactId)} · v${promotionText(record.artifactRevision)}</p><pre>${promotionText(record.note)}</pre>
+ ${v?`<h4>${T('人工核验证据','Human verification evidence')}</h4><p>${promotionText(v.actionId)} · ${promotionText(v.checkedAt)}</p><p>${promotionText(v.url)}</p><pre>${promotionText(v.evidence)}</pre>`:''}
+ ${r?`<h4>${T('复查证据','Recheck evidence')}</h4><p>${promotionText(r.reportId)}</p><pre>${promotionText(r.note)}</pre>${A.data.reports?.find(x=>x.id===r.reportId)?.observation?promotionObservationCard(A.data.reports.find(x=>x.id===r.reportId)):''}`:''}
+ <div class="row promotion-toolbar">${promotionCanVerify()&&promotionDifferentReviewer(record.author)&&record.status==='awaiting_verification'?button(T('人工核验已发布修订','Human-verify published correction'),'promotion-correction-verify',record.id,'small'):''}
+ ${promotionCanWrite()&&record.status==='awaiting_recheck'?button(T('关联核验后的真实复查','Link actual post-verification recheck'),'promotion-correction-recheck',record.id,'small'):''}</div></details>`;
+}
+function promotionWorkflowModal(id,revision,title,body,submit,label){
+ const draft={dataset:{promotionWorkflow:id,revision:String(revision)}},saved=promotionReadDraft(draft);
+ const key=String(saved?.revision)===String(revision)&&saved.requestKey?saved.requestKey:promotionRequest();
+ agentModal(title,()=>`<div data-promotion-workflow="${promotionText(id)}" data-revision="${promotionText(revision)}">${body()}<p class="source-note" data-save-state>${T('输入只暂存在当前标签页；确认勾选与文件不恢复。','Inputs stay in this tab only; confirmations and files are not restored.')}</p></div>`,submit?async values=>{
+  // A rejected or uncertain command keeps the text and idempotency key for reconciliation.
+  await submit(values,key);await agentDone();try{sessionStorage.removeItem(promotionDraftKey(draft))}catch{}
+ }:null,label);
+ try{if(!saved||String(saved.revision)===String(revision))sessionStorage.setItem(promotionDraftKey(draft),JSON.stringify({revision:String(revision),values:saved?.values||{},requestKey:key}));}catch{}
+ promotionRestoreDrafts();
+}
+function promotionVideoNew(id){
+ promotionRequire(promotionCanWrite(),'没有制作任务写权限。','No production-task write permission.');
+ const contents=A.data.artifacts.filter(a=>a.campaignId===id&&a.kind==='content'),members=promotionAssignees();
+ promotionWorkflowModal('video-new:'+id,contents.map(a=>a.id+':'+a.revision).join('|'),()=>T('建立人工视频制作任务','Create a human video production task'),()=>`
+ ${select('artifactId',T('已保存稿件 / 脚本版本','Saved draft / script version'),[['',T('请选择','Choose')],...contents.map(a=>[a.id,a.title+' · v'+a.revision])],'')}
+ ${select('assigneeId',T('启用的 owner/editor 负责人','Active owner/editor assignee'),members.map(m=>[m.id,(m.name||m.id)+' · '+m.id]),A.data.member.id)}
+ ${area('brief',T('真实制作要求、素材范围与交付要求','Actual brief, asset scope and deliverables'),'')}
+ <p>${T('普通 editor 无法读取完整成员列表时，仅列出自己并显示 ID，不推断其他负责人。','When an editor cannot read all members, only self is listed by ID; no other assignees are inferred.')}</p>`,
+ async (values,key)=>{const a=contents.find(x=>x.id===values.artifactId);promotionRequire(a&&members.some(m=>m.id===values.assigneeId)&&values.brief?.trim(),'请选择稿件、有效负责人并填写制作要求。','Choose a draft, valid assignee and actual brief.');await api('promotions/'+id+'/video-task',{requestKey:key,artifactId:a.id,artifactRevision:a.revision,brief:values.brief,assigneeId:values.assigneeId});},()=>T('保存制作任务','Save production task'));
+}
+function promotionVideoSubmit(id){
+ const task=promotionVideoTask(id);promotionRequire(task&&promotionVideoPermissions(task).submit,'此任务不可由你提交。','You cannot submit this task.');
+ const videos=(A.data.media||[]).filter(m=>m.type?.startsWith('video/'));
+ promotionWorkflowModal('video-submit:'+id,task.version,()=>T('提交已有成片供审核','Submit an existing finished video for review'),()=>`
+ ${select('mediaId',T('已上传的视频（不是脚本）','Uploaded video (not a script)'),[['',T('请选择','Choose')],...videos.map(m=>[m.id,(m.name||m.id)+' · '+m.id])],'')}
+ <div id="promotion-video-preview">${button(T('查看所选已上传成片','Inspect selected uploaded video'),'promotion-video-preview-upload',id,'small')}</div>
+ ${area('note',T('成片说明、限制和待核对事项','Video notes, limitations and checks'),'')}
+ ${check('rightsConfirmed',T('确认此视频素材、音乐与肖像使用权，并已检查实际成片','Confirm footage, music and likeness rights; inspected the actual file'))}
+ <p>${T('没有成片时，先在素材区上传视频。这里不会把脚本转成视频。上传到本任务不会改动原稿。','No finished video? Upload a video here first. This does not turn a script into video. Task uploads do not revise the draft.')}</p>
+ ${field('promotionVideoFile',T('待上传成片','Video file to upload'),'','file','accept="video/mp4,video/webm,video/quicktime"')}
+ ${check('uploadRights',T('上传前已确认文件使用权','Confirmed file rights before upload'))}
+ ${button(T('仅上传视频，随后选择并提交','Upload only, then select and submit'),'promotion-video-upload',id,'small')}`,
+ async (values,key)=>{promotionRequire(videos.some(m=>m.id===values.mediaId)&&values.rightsConfirmed,'请选择已上传的视频并确认权利。','Choose an uploaded video and confirm rights.');await api('video-tasks/'+id+'/submit',{version:task.version,requestKey:key,mediaId:values.mediaId,note:values.note,rightsConfirmed:true});},()=>T('提交成片，不发布','Submit video, do not publish'));
+}
+async function promotionVideoUpload(id){
+ const task=promotionVideoTask(id);promotionRequire(task&&promotionVideoPermissions(task).submit,'此任务不可由你上传。','You cannot upload for this task.');
+ const file=document.querySelector('[name=promotionVideoFile]')?.files?.[0],rights=document.querySelector('[name=uploadRights]')?.checked,limit=(A.data?.runtime?.cloud?24:64)*1024*1024;
+ promotionRequire(file&&['video/mp4','video/webm','video/quicktime'].includes(file.type)&&file.size>0&&file.size<=limit&&rights,'请选择限额内视频并确认使用权。','Choose a video within the size limit and confirm rights.');
+ const data=await mediaReadFile(file);await api('media',{name:file.name,type:file.type,base64:data.split(',')[1]});await agentLoad(true);promotionVideoSubmit(id);
+}
+function promotionVideoReview(id){
+ const task=promotionVideoTask(id);promotionRequire(task&&promotionVideoPermissions(task).review,'此任务不可由你审核。','You cannot review this task.');
+ const risk=promotionVideoRisk(task);
+ promotionWorkflowModal('video-review:'+id,task.version,()=>T('审核成片，不批准营销稿','Review the video, not marketing copy'),()=>`<p>${promotionText(task.sourceSnapshot?.title||task.artifactId)} · v${promotionText(task.sourceRevision)}</p><pre>${promotionText(task.brief)}</pre><pre>${promotionText(task.sourceSnapshot?.body)}</pre>
+ <p>${promotionText(task.result?.mediaId)} · SHA-256 ${promotionText(task.result?.sha256)}</p><pre>${promotionText(task.result?.note)}</pre>
+ ${risk?`<div class="notice">${promotionText(risk)}</div>`:''}
+ <div id="promotion-video-preview">${button(T('读取并查看提交成片','Load and inspect submitted video'),'promotion-video-preview',id,'small')}</div>
+ ${select('decision',T('成片决定','Video decision'),[['',T('请选择','Choose')],...(!risk?[['accept',T('接收成片','Accept video')]]:[]),['reject',T('退回制作','Reject video')]],'')}
+ ${area('note',T('实际成片核对 / 退回理由','Actual video review / rejection reason'),'')}
+ ${check('confirmed',T('已播放并人工核对产品外观、事实依据、制作要求及素材 / 音乐 / 肖像许可；指纹一致不替代这些检查，接收不批准文稿、不发布','Played and checked product appearance, factual evidence, brief and footage / music / likeness rights. Matching digests do not replace these checks; acceptance does not approve copy or publish'))}`,
+ async values=>{promotionRequire(['accept','reject'].includes(values.decision)&&values.confirmed,'请选择成片决定并明确人工确认。','Choose a video decision and explicitly confirm human review.');promotionRequire(values.decision!=='accept'||!promotionVideoRisk(task),'原稿或 source 已变化，不能接收。','Draft or source changed; acceptance is blocked.');await api('video-tasks/'+id+'/review',{version:task.version,decision:values.decision,note:values.note,confirmed:true});},()=>T('记录成片审核','Record video review'));
+}
+function promotionVideoAttach(id){
+ const task=promotionVideoTask(id);promotionRequire(task&&promotionVideoPermissions(task).attach,'不能把此成片附到已变化的原稿。','Cannot attach this video to a changed draft.');
+ const a=promotionContent(task.artifactId);
+ promotionWorkflowModal('video-attach:'+id,task.version+':'+a.revision,()=>T('附到原稿，将使旧核对失效','Attach to draft; old checks become invalid'),()=>`<p>${promotionText(a.title)} · v${a.revision}</p>
+ <div class="notice">${T('附加成片会创建原稿新版本，使旧产品核对与审批不再适用于新版本。之后需要重新核对并准备批准，不自动发布。','Attaching creates a new draft revision. Old product checks and approvals do not apply to it; recheck and prepare approval again. No automatic publication.')}</div>
+ ${check('rightsConfirmed',T('确认附加此成片的使用权，并理解需重新核对新版本','Confirm attachment rights and understand the new revision needs rechecking'))}`,
+ async values=>{promotionRequire(values.rightsConfirmed&&!promotionVideoRisk(task),'请确认使用权并重新核对原稿版本。','Confirm rights and recheck the draft version.');await api('video-tasks/'+task.id+'/attach',{revision:a.revision,rightsConfirmed:true});},()=>T('附加已接收成片','Attach accepted video'));
+}
+function promotionVideoInspect(id){
+ const task=promotionVideoTask(id);promotionRequire(task?.result,'尚未提交成片。','No video has been submitted.');
+ agentModal(()=>T('查看实际提交成片','Inspect the actual submitted video'),()=>`<p>${promotionText(task.sourceSnapshot?.title||task.artifactId)} · v${promotionText(task.sourceRevision)}</p><p>${promotionText(task.result.mediaId)} · ${promotionText(task.result.type)}</p><pre>${promotionText(task.result.note)}</pre>
+ <p>${T('观看不代表成片接收、营销稿批准或发布。指纹核对不能替代产品外观、事实依据和许可检查。','Viewing is not video acceptance, copy approval or publication. Digest checks cannot replace appearance, factual evidence and rights checks.')}</p>
+ <div id="promotion-video-preview">${button(T('读取并播放已上传成片','Load and play the uploaded video'),'promotion-video-preview',id,'small')}</div>`,null);
+}
+async function promotionVideoPreview(id,uploaded=false){
+ const task=promotionVideoTask(id),selected=uploaded?(A.data.media||[]).find(m=>m.id===document.querySelector('[name=mediaId]')?.value):null,result=uploaded&&selected?{...selected,mediaId:selected.id}:uploaded?null:task?.result,target=document.getElementById('promotion-video-preview');
+ promotionRequire(result?.mediaId&&target,'没有可读取的提交成片。','No submitted video is available to inspect.');
+ const response=await fetch(apiURL('/api/media/'+encodeURIComponent(result.mediaId)+'?workspace='+encodeURIComponent(A.workspace)),{credentials:'include',headers:A.sessionToken?{Authorization:'Bearer '+A.sessionToken}:{}});
+ promotionRequire(response.ok,'提交成片读取失败。','Submitted video could not be read.');
+ const bytes=await response.arrayBuffer(),digest=[...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(b=>b.toString(16).padStart(2,'0')).join('');
+ promotionRequire(digest===result.sha256&&bytes.byteLength===result.size&&result.type?.startsWith('video/'),'成片大小或指纹与提交记录不符，不能据此接收。','Video size or digest differs from the submitted record; do not accept it.');
+ if(!target.isConnected)return;
+ const video=document.createElement('video'),url=URL.createObjectURL(new Blob([bytes],{type:result.type}));
+ video.src=url;video.controls=true;video.preload='none';video.style.maxWidth='100%';video.setAttribute('aria-label',T('已核对指纹的提交成片','Submitted video with verified digest'));target.replaceChildren(video);setTimeout(()=>URL.revokeObjectURL(url),600000);
+}
+function promotionCorrectionNew(value){
+ const [id,reportId]=value.split('|'),c=promotionCampaign(id);promotionRequire(promotionCanWrite()&&promotionCorrectionEligible(c,reportId),'仅可为已确认的修订 / 补充解释诊断建立记录。','Only a confirmed revision / explanation diagnosis can create a correction.');
+ const target=c.diagnoses.find(d=>d.reportId===reportId)?.artifactId,contents=A.data.artifacts.filter(a=>a.campaignId===id&&a.kind==='content'&&(!target||a.id===target));
+ promotionWorkflowModal('correction-new:'+id+':'+reportId,c.version+':'+contents.map(a=>a.id+':'+a.revision).join('|'),()=>T('建立 GEO 修订记录','Create GEO correction record'),()=>`
+ ${select('artifactId',T('已保存的修订稿版本','Saved correction draft revision'),[['',T('请选择','Choose')],...contents.map(a=>[a.id,a.title+' · v'+a.revision])],'')}
+ ${area('note',T('实际修订范围与限制','Actual correction scope and limitations'),'')}
+ <p>${T('记录不代表已发布。下一步需有本版本已发布动作和交付证据，由有 approve 权限的人明确人工核验。','This record is not publication. Next, this revision needs a published action and delivery evidence, explicitly human-verified by an approve role.')}</p>`,
+ async (values,key)=>{const a=contents.find(x=>x.id===values.artifactId);promotionRequire(a&&values.note?.trim(),'请选择修订稿并填写真实修订说明。','Choose the correction draft and enter actual correction notes.');await api('promotions/'+id+'/correction',{requestKey:key,reportId,artifactId:a.id,artifactRevision:a.revision,note:values.note});},()=>T('保存修订记录','Save correction record'));
+}
+function promotionCorrectionVerify(id){
+ const record=promotionCorrection(id);promotionRequire(promotionCanVerify()&&record?.status==='awaiting_verification'&&promotionDifferentReviewer(record.author),'此记录不可由你核验。','You cannot verify this record.');
+ const available=promotionPublishedActions(record);
+ promotionWorkflowModal('correction-verify:'+id,record.version,()=>T('人工核验已发布修订版本','Human-verify the published correction revision'),()=>`
+ ${select('actionId',T('此修订版本的已发布动作 / 交付','Published action / delivery for this revision'),[['',T('请选择','Choose')],...available.map(a=>[a.id,a.id+' · v'+a.package.artifactRevision])],'')}
+ ${field('url',T('已人工检查的真实公开地址','Actual public URL checked by a human'),'','url')}${area('evidence',T('核验范围、原版本与远端证据','Verification scope, original revision and remote evidence'),'')}
+ ${check('confirmed',T('我已人工核验此修订版本在原账号实际发布；不是凭提交者声明','I human-verified this revision published on the original account, not merely a submitter claim'))}
+ ${!available.length?`<div class="notice">${T('尚无此 revision 的已发布动作与确认交付。先完成原批准包发布与回执核验。','No published action and confirmed delivery for this revision. Complete the original package publication and receipt verification first.')}</div>`:''}`,
+ available.length?async (values,key)=>{promotionRequire(available.some(a=>a.id===values.actionId)&&values.url?.trim()&&values.evidence?.trim()&&values.confirmed,'请选择本版本已发布动作、填写地址和证据，并明确人工确认。','Choose this revision’s published action, URL and evidence, and explicitly confirm human verification.');await api('geo-corrections/'+id+'/verify',{version:record.version,requestKey:key,actionId:values.actionId,url:values.url,evidence:values.evidence,confirmed:true});}:null,()=>T('记录人工核验','Record human verification'));
+}
+function promotionCorrectionRecheck(id){
+ const record=promotionCorrection(id);promotionRequire(promotionCanWrite()&&record?.status==='awaiting_recheck','此记录不可由你复查。','You cannot recheck this record.');
+ const reports=promotionRecheckReports(record);
+ promotionWorkflowModal('correction-recheck:'+id,record.version,()=>T('关联核验后的真实观察','Link an actual observation after verification'),()=>`
+ ${select('reportId',T('原观察的真实新复查（核验之后）','Actual follow-up to the original observation (after verification)'),[['',T('请选择','Choose')],...reports.map(r=>[r.id,r.observation.question+' · '+r.observation.observedAt])],'')}
+ ${area('note',T('同条件可比性、限制和复查结论，不推断因果','Comparable conditions, limitations and findings; no causal inference'),'')}
+ <p>${T('只列出 previousReportId 指向原观察且实际观察时间晚于人工核验的记录。不自动生成回答、不主动抓取网络、不把变化归因为本次修订。','Only observations whose previousReportId points to the original and whose actual time is after verification are listed. No generated answers, proactive web collection or causal attribution.')}</p>
+ ${button(T('先记录真实同条件观察','Record an actual comparable observation first'),'promotion-recheck',record.reportId,'small')}`,
+ reports.length?async (values,key)=>{promotionRequire(reports.some(r=>r.id===values.reportId)&&values.note?.trim(),'请选择真实新复查并填写可比性与限制。','Choose an actual new recheck and record comparability and limitations.');await api('geo-corrections/'+id+'/recheck',{version:record.version,requestKey:key,reportId:values.reportId,note:values.note});}:null,()=>T('保存真实复查关联','Save actual recheck link'));
 }
 
 async function promotionPreviewMedia(value){
@@ -899,6 +1077,8 @@ mediaEditor=function(id){
  ${button(T('返回已保存稿件','Back to saved content'),'promotion-content',id,'small')}`,null);
 };
 Object.assign(actions,{
+ 'promotion-video-new':aRun(promotionVideoNew),'promotion-video-submit':aRun(promotionVideoSubmit),'promotion-video-upload':aRun(promotionVideoUpload),'promotion-video-review':aRun(promotionVideoReview),'promotion-video-attach':aRun(promotionVideoAttach),'promotion-video-inspect':aRun(promotionVideoInspect),'promotion-video-preview':aRun(promotionVideoPreview),'promotion-video-preview-upload':aRun(id=>promotionVideoPreview(id,true)),
+ 'promotion-correction-new':aRun(promotionCorrectionNew),'promotion-correction-verify':aRun(promotionCorrectionVerify),'promotion-correction-recheck':aRun(promotionCorrectionRecheck),
  'agent-action':agentAction,'agent-artifact':agentArtifact,'simple-review':simpleReview,'media-editor':mediaEditor,
  'promotion-feedback':promotionFeedback,'promotion-diagnose':promotionDiagnose,'promotion-new':promotionNew,'promotion-open':id=>promotionOpen(id),'promotion-home':()=>promotionOpen(null),
  'promotion-more':()=>{promotionQueueLimit+=12;render()},'promotion-select':id=>{promotionArtifactId=id;render()},'promotion-queue':key=>{promotionQueue=key;promotionQueueLimit=6;render()},
@@ -916,6 +1096,7 @@ document.addEventListener('submit',async event=>{
 });
 const promotionPreviousRender=render;render=function(){promotionPreviousRender();promotionRestoreDrafts();if(page==='agents'&&promotionId){const q=new URL(location.href);q.searchParams.set('promotion',promotionId);if(promotionArtifactId)q.searchParams.set('artifact',promotionArtifactId);history.replaceState({},'',q);}};
 const promotionStyle=document.createElement('style');promotionStyle.textContent=`
+.promotion-production summary{cursor:pointer;font-weight:600}.promotion-production-record,.promotion-production-record p{overflow-wrap:anywhere;min-width:0}.promotion-production .btn,[data-promotion-workflow] .btn{white-space:normal;max-width:100%;overflow-wrap:anywhere}[data-promotion-workflow] input,[data-promotion-workflow] select,[data-promotion-workflow] textarea{min-width:0;max-width:100%}.modal:has([data-promotion-workflow]) .modal-foot .btn{white-space:normal;overflow-wrap:anywhere}
 .promotion-home{display:block}.promotion-queue-tabs{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0}.promotion-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.promotion-card{padding:20px;margin-bottom:16px;min-width:0}.promotion-card h3{margin:10px 0}.promotion-row{display:flex;gap:12px;justify-content:space-between;align-items:center;padding:14px 0;border-bottom:1px solid var(--line)}.promotion-row div{min-width:0}.promotion-row strong,.promotion-row small{display:block;overflow-wrap:anywhere}.promotion-row small{color:var(--muted);margin-top:5px}.promotion-detail-layout{display:grid;grid-template-columns:230px minmax(0,1fr);gap:16px}.promotion-content-link{display:block;width:100%;text-align:left;padding:12px;margin:8px 0;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink)}.promotion-content-link span,.promotion-content-link small{display:block;overflow-wrap:anywhere;margin-top:5px}.promotion-content-link.is-active{background:#f0ebff;border-color:var(--accent)}.promotion-toolbar{margin:18px 0;flex-wrap:wrap}.promotion-card textarea{min-height:180px}.promotion-card pre,.modal-body pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%;font:13px/1.7 system-ui}.promotion-observation{border-top:1px solid var(--line);padding:16px 0}.promotion-observation summary,.promotion-preview summary{cursor:pointer;font-weight:600}.promotion-preview{margin:20px 0}[data-form-error]{color:#a82937}[data-save-state]{overflow-wrap:anywhere}@media(max-width:720px){.promotion-grid,.promotion-detail-layout{grid-template-columns:1fr}.promotion-card{padding:16px}.promotion-row{align-items:flex-start}.promotion-toolbar .btn{white-space:normal}.promotion-queue-tabs .btn{flex:1 1 45%;white-space:normal}}`;
 document.head.appendChild(promotionStyle);render();
 
