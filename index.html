@@ -700,6 +700,75 @@ function handoffZip(files){
  const output=new Uint8Array(offset+size+22);let cursor=0;for(const chunk of [...chunks,...directory,end]){output.set(chunk,cursor);cursor+=chunk.length}return output;
 }
 
+// Page-scoped read-only analytics: linked to a promotion, never attributed sales.
+function promotionPageMeasurements(c){
+ if(!Array.isArray(A.data?.pageMeasurements))return '';
+ const targets=A.data.pageMeasurements.filter(t=>t.campaignId===c.id);
+ return `<section class="card promotion-card"><h3>${T('页面级真实访问','Actual page-scoped views')}</h3>
+ <p>${T('按指定 GA4 媒体资源、域名、路径、访客国家和日期测量。查询参数不作为独立页面；关联推广不等于活动归因，也不代表订单。','Measure a specified GA4 property, host, path, visitor country and dates. Query strings are not separate pages; linking is not attribution or orders.')}</p>
+ ${simpleIsOwner()?button(T('配置本推广测量页','Configure measured page'),'page-measurement-configure',c.id,'small'):''}
+ ${targets.map(promotionPageMeasurementCard).join('')||`<div class="notice soft">${T('尚未配置：不把未接入显示为零。请产品/数据负责人核对正确站点的 GA4 与页面浏览埋点。','Not configured; missing integration is not zero. Ask the data owner to check the correct site property and page-view instrumentation.')}</div>`}
+ </section>`;
+}
+function promotionPageMeasurementCard(t){
+ const states={not_collected:T('尚未采集','Not collected'),queued:T('等待只读采集','Read-only collection queued'),running:T('采集中','Collecting'),
+  measured:T('已取得页面访问记录','Page views measured'),measured_zero:T('返回记录中的访问数为零','Returned records contain zero views'),
+  no_rows:T('没有返回记录，不能断言零访问','No rows returned; not a verified zero'),limited:T('返回数据受限，暂不作为完整数值','Limited response; not a complete count'),
+  failed:T('采集失败','Collection failed'),blocked:T('采集阻塞','Collection blocked'),cancelled:T('采集已取消','Collection cancelled'),
+  disabled:T('目标已停用','Target disabled'),connection_changed:T('授权/媒体资源变化，请重配','Authorization/property changed; reconfigure'),invalid_report:T('报告合同不符','Incompatible report')};
+ const state=t.latest?.state||'not_collected',summary=t.summary;
+ const report=A.data.reports.find(r=>r.id===t.latest?.reportId),query=report?.query;
+ const showValue=['measured','measured_zero'].includes(state)&&Number.isSafeInteger(summary?.views);
+ return `<details class="sourceblock promotion-page-measurement"><summary>${promotionText(t.name)} · ${promotionText(states[state]||state)}</summary>
+ <p>${promotionText(t.pageUrl)}<br>GA4 ${promotionText(t.propertyId)} · ${promotionText(t.market)} · ${T('域名 / 路径精确匹配','Exact host / path')}</p>
+ <p>${showValue?`${T('页面浏览次数：','Page views: ')}<strong>${summary.views}</strong>`:T('页面浏览次数：未知/未确认，不显示假零','Page views: unknown/unconfirmed, no invented zero')}</p>
+ ${query?`<p>${promotionText(query.startDate)} → ${promotionText(query.endDate)} · ${promotionText(summary?.timeZone,T('时区未知','Timezone unknown'))}</p>`:''}
+ <p>${T('重复浏览计数，国家按 GA4 访客地理位置，不是购买市场归因；页面其它来源访问也包含在内。','Repeated views count. Country is GA4 visitor geography, not purchase-market attribution; other traffic to this page is included.')}</p>
+ ${summary?.notes?.length?`<p>${summary.notes.map(promotionText).join('<br>')}</p>`:''}
+ ${t.latest?.error?`<div class="notice">${promotionText(t.latest.error.message)} · ${promotionText(t.latest.error.code)}</div>`:''}
+ <p>${T('负责人提供的站点/埋点依据：','Owner-provided site/instrumentation evidence: ')}${promotionText(t.trackingEvidence)}</p>
+ <div class="row promotion-toolbar">
+ ${promotionCanWrite()&&t.active&&state!=='connection_changed'?button(T('选择窗口采集','Collect selected window'),'page-measurement-collect',t.id,'small'):''}
+ ${report?button(T('查看原始来源与查询','Inspect raw source and query'),'agent-report',report.id,'small'):''}
+ ${['failed','blocked'].includes(state)&&promotionCanWrite()&&t.latest.jobId?button(T('查看采集任务','Inspect collection job'),'simple-job-detail',t.latest.jobId,'small'):''}
+ ${simpleIsOwner()?button(t.active?T('停用此测量目标','Disable target'):T('启用此测量目标','Enable target'),'page-measurement-active',t.id,'small'):''}
+ </div></details>`;
+}
+function promotionConfigureMeasuredPage(id){
+ promotionRequire(simpleIsOwner(),'仅数据负责人可配置测量归属。','Only the owner can configure measurement scope.');
+ const connections=A.data.connections.filter(c=>c.provider==='ga4'&&c.status!=='revoked'&&c.hasCredentials);
+ const urls=[...new Set(A.data.actions.filter(a=>a.package.channel==='Website'&&A.data.artifacts.find(x=>x.id===a.package.artifactId)?.campaignId===id)
+  .flatMap(a=>A.data.deliveries.filter(d=>d.actionId===a.id&&d.url&&((d.kind==='api_result'&&d.state==='published')||(d.kind==='manual_verification'&&d.outcome==='published'))).map(d=>d.url)))];
+ promotionWorkflowModal('page-configure:'+id,A.data.connections.map(c=>c.id+':'+c.revision).join('|'),()=>T('确认页面与 GA4 归属','Confirm page and GA4 property'),()=>`
+ ${select('connectionId',T('正确站点的 GA4 媒体资源','GA4 property for the correct site'),[['',T('请选择，不自动套用其他站点','Choose; never substitute another site')],...connections.map(c=>[c.id,c.name+' · '+c.config?.propertyId])],'')}
+ ${field('name',T('测量目标名称','Measured-page label'),'')}
+ ${field('pageUrl',T('真实 HTTPS 页面（去掉查询参数后按路径测量）','Actual HTTPS page (query strings are ignored)'),'','url')}
+ ${urls.length?`<p>${T('本推广已有页面，供人工核对：','Existing promotion pages to verify: ')}${urls.map(u=>`<span>${promotionText(u)}</span>`).join('<br>')}</p>`:''}
+ ${area('trackingEvidence',T('核对媒体资源归属和页面浏览埋点的依据，不含个人资料','Property ownership and page-view instrumentation evidence; no personal data'),'')}
+ ${check('confirmed',T('我已核对这个 GA4 确实采集此域名和页面的浏览事件，不使用另一网站的资源替代','Confirmed this property collects page views for this host and page; not another website property'))}
+ <p>${T('此步骤是人工确认归属，不自动证明埋点准确；接入无数据时仍需检查采集和授权。','This is a human scope confirmation, not automatic proof of correct instrumentation. No data still requires checks of tracking and access.')}</p>`,
+ connections.length?async(values,key)=>{await api('promotions/'+id+'/measurement-target',{...values,requestKey:key,confirmed:!!values.confirmed});}:null,
+ ()=>T('保存测量归属','Save measurement scope'));
+}
+function promotionCollectMeasuredPage(id){
+ promotionRequire(promotionCanWrite(),'没有采集权限。','No collection permission.');
+ const t=A.data.pageMeasurements.find(t=>t.id===id);promotionRequire(t?.active,'测量目标不存在或已停用。','Measurement target missing or disabled.');
+ const end=new Date(Date.now()-86400000).toISOString().slice(0,10),start=new Date(Date.now()-7*86400000).toISOString().slice(0,10);
+ promotionWorkflowModal('page-collect:'+id,t.version,()=>T('只读采集指定页面','Read-only collection for the selected page'),()=>`
+ <p>${promotionText(t.name)}<br>${promotionText(t.pageUrl)} · GA4 ${promotionText(t.propertyId)} · ${promotionText(t.market)}</p>
+ ${field('startDate',T('窗口开始','Window start'),start,'date')}${field('endDate',T('窗口结束（不含今日）','Window end (before today)'),end,'date')}
+ <p>${T('最多 366 个日历日，按 GA4 属性时区解释；不取未结束日期。授权/归属变化会阻断，受每日采集额度约束。结果只代表此页这些国家访客的浏览记录，不是这轮推广独占访问或订单。','At most 366 calendar days, interpreted in the property timezone; no unfinished dates. Scope/auth changes block collection; daily limits apply. This is page traffic from the selected country, not exclusive campaign traffic or orders.')}</p>`,
+ async(values,key)=>{await api('promotions/'+t.campaignId+'/measure-page',{...values,targetId:id,requestKey:key});},
+ ()=>T('加入只读采集队列','Queue read-only collection'));
+}
+function promotionSetMeasuredPageActive(id){
+ promotionRequire(simpleIsOwner(),'仅负责人可更改测量目标。','Only the owner can change measurement activity.');
+ const t=A.data.pageMeasurements.find(t=>t.id===id);
+ agentModal(()=>t.active?T('停用测量目标','Disable measurement target'):T('启用测量目标','Enable measurement target'),()=>`<p>${promotionText(t.name)}</p><p>${T('历史报告保留；旧的等待任务不会被重新解释为新映射。修改后需要新建采集。','Historical reports stay intact. Existing queued jobs are not reinterpreted as a new mapping; queue a new collection.')}</p>`,
+ async()=>{await api('measurement-targets/'+id+'/active',{version:t.version,active:!t.active});await agentDone();});
+}
+Object.assign(actions,{'page-measurement-configure':aRun(promotionConfigureMeasuredPage),'page-measurement-collect':aRun(promotionCollectMeasuredPage),'page-measurement-active':aRun(promotionSetMeasuredPageActive)});
+
 // Employee workflow: existing content, new production, and evidence-driven correction.
 // This view shares the durable Engine; it never synthesizes publication or sales results.
 let promotionId=params.get('promotion'),promotionArtifactId=params.get('artifact'),promotionQueue='drafts',promotionQueueLimit=6;
@@ -758,6 +827,7 @@ function promotionDetail(c){
  ${promotionProductionDetails(c)}
  <div class="promotion-detail-layout"><aside class="card promotion-card"><h3>${T('渠道内容','Channel content')}</h3>${contents.map(x=>`<button type="button" class="promotion-content-link ${x.id===a?.id?'is-active':''}" data-act="promotion-select" data-value="${x.id}"><strong>${promotionText(x.channel)}</strong><span>${promotionText(x.title)}</span><small>v${x.revision} · ${x.contentCheck?.revision===x.revision?T('已核对本版本','Version checked'):T('待产品负责人核对','Owner check needed')}</small></button>`).join('')||`<p>${T('选择已有内容，或准备新稿。上传素材不会发布。','Use existing content or prepare a draft. Uploading does not publish.')}</p>`}</aside><section>${a?promotionEditor(a):empty(T('准备第一个成果','Prepare the first output'),T('可以直接使用已有照片、成片和正文，不必先写官网文章。','Use existing images, finished videos and text; no website article is required.'))}</section></div>
  <section class="card promotion-card"><h3>${T('GEO 依据与复查','GEO evidence and rechecks')}</h3>${reports.map(r=>promotionObservationCard(r)+promotionDiagnosisCard(c,r.id)).join('')||`<p>${T('尚未关联观察。不显示虚构机会或趋势。','No observations linked. No invented opportunities or trends.')}</p>`}</section>
+ ${promotionPageMeasurements(c)}
  <section class="card promotion-card"><h3>${T('交付与经营结果','Delivery and business results')}</h3>${promotionFeedbackCards(c)}<p>${T('渠道回执见各稿件；订单/购买事件尚未关联，不能以商品总销量或点赞替代本次推广订单。','Channel receipts are attached to content. Orders / purchase events are not connected here; product totals or likes are not attributed orders.')}</p></section></section>`;
 }
 function promotionEditor(a){
@@ -794,9 +864,20 @@ function promotionCheck(id){
  agentModal(()=>T('产品负责人核对本版本','Owner checks this version'),()=>`<p>${promotionText(a.title)} · v${a.revision}</p>${sources.map(s=>check('source_'+s.id,promotionText(s.url||s.id))).join('')}${area('note',T('核对依据、限制与使用范围','Evidence checked, limitations and scope'),'')}${check('confirmed',T('核对本版本陈述、素材许可和来源，不把企业自述当独立检测','Checked claims, media rights and sources; first-party statements are not independent tests'))}${promotionCampaign(a.campaignId)?.purpose==='maintenance'?check('noPurchaseCTA',T('没有承诺缺货商品可购买或添加错误购买 CTA','No unsupported availability / purchase CTA')):''}`,async values=>{await api('artifacts/'+id+'/check',{revision:a.revision,note:values.note,confirmed:!!values.confirmed,noPurchaseCTA:!!values.noPurchaseCTA,sourceIds:sources.filter(s=>values['source_'+s.id]).map(s=>s.id)});await agentDone();});
 }
 function promotionPrepare(id){
- const a=promotionContent(id);if(document.querySelector('[data-promotion-form="'+id+'"]')&&document.querySelector('[data-promotion-form="'+id+'"] [name=body]').value!==a.body)throw Error(T('先保存修改，再准备审核包。','Save edits before preparing approval.'));
- const conns=A.data.connections.filter(c=>c.status!=='revoked'&&c.config.allowedMarkets?.includes(a.market)&&A.data.catalog.find(p=>p.id===c.provider)?.channels?.includes(a.channel));
- agentModal(()=>T('选择发布方式与具体账号','Choose delivery mode and account'),()=>`${select('connectionId',T('账号 / 发布方式','Account / delivery method'),[['',T('请选择','Choose')],...conns.map(c=>[c.id,c.name+' · '+c.provider])],'')}<p>${T('附件图文可走人工交接。自动媒体发布仍按具体平台能力验收，连接测试不代表图文可发。','Attached media supports manual handoff. Automatic media publishing is format-specific; a connection test does not prove multimedia support.')}</p>`,async values=>{const c=A.data.connections.find(c=>c.id===values.connectionId);if(A.data.catalog.find(p=>p.id===c?.provider)?.mode==='api'){closeDialog();agentPrepare(id);return}const action=await api('actions',{artifactId:id,connectionId:values.connectionId});await agentLoad(true);agentAction(action.id);},()=>T('准备明确审核包','Prepare approval'));
+ const a=promotionContent(id),form=document.querySelector('[data-promotion-form="'+id+'"]');
+ if(form&&(form.elements.body.value!==a.body||form.elements.title.value!==a.title))throw Error(T('先保存修改，再准备审核包。','Save edits before preparing approval.'));
+ const conns=A.data.connections.filter(c=>c.status!=='revoked'&&c.config?.allowedMarkets?.includes(a.market)&&A.data.catalog.find(p=>p.id===c.provider)?.channels?.includes(a.channel));
+ const illustrated=a.channel==='Website'&&a.attachments?.length>0;
+ agentModal(()=>T('选择发布方式与具体账号','Choose delivery mode and account'),()=>`${select('connectionId',T('账号 / 发布方式','Account / delivery method'),[['',T('请选择','Choose')],...conns.map(c=>[c.id,c.name+' · '+c.provider])],'')}
+ <p>${T('Shopify 官网图片可随正文自动提交；其他格式仍按能力选择。连接测试不代替格式和真实账号验收。','Shopify website images can be submitted with the article. Other formats remain capability-specific; connection tests do not replace format and real-account validation.')}</p>
+ ${illustrated?`<div class="notice">${T('仅当选择 Shopify 图片文章：准备审核包会将图片放到公开、固定指纹的网址，退回或取消后网址也可能仍可访问。不要包含个人、机密或无授权素材。','For Shopify image articles: preparing approval makes images public at immutable URLs. They can remain accessible after rejection or cancellation. No personal, confidential or unlicensed assets.')}</div>${check('publicImagesConfirmed',T('选择 Shopify 时，我明确允许这些图片在准备阶段公开','If using Shopify, I explicitly allow public image staging during preparation'))}<p>${A.data.capabilities?.shopifyIllustrated?T('后端已配置公开图片托管；仅支持图片，不自动处理视频。','Public image hosting is configured; images only, no automatic embedded video.'):T('后端未配置公开图片托管，Shopify 图文仍不可准备；可用人工交接。','Public image hosting is not configured; use manual handoff for images.')}</p>`:''}`,
+ async values=>{const c=A.data.connections.find(c=>c.id===values.connectionId);promotionRequire(c,'请选择发布账号。','Choose a publishing account.');
+ if(c.provider==='shopify'){
+  const action=await api('actions',{artifactId:id,connectionId:c.id,publicImagesConfirmed:!!values.publicImagesConfirmed});await agentLoad(true);agentAction(action.id);return;
+ }
+ if(A.data.catalog.find(p=>p.id===c.provider)?.mode==='api'){closeDialog();agentPrepare(id);return;}
+ const action=await api('actions',{artifactId:id,connectionId:c.id});await agentLoad(true);agentAction(action.id);
+ },()=>T('准备明确审核包','Prepare approval'));
 }
 function promotionObservationCard(r){
  const o=r.observation;return `<details class="promotion-observation"><summary>${promotionText(o.question)} · ${promotionText(o.platform)} · ${promotionText(o.method)}</summary><p>${promotionText(o.market+' · '+o.language+' · '+o.observedAt)}</p><p>${promotionText(o.conditions)}</p><pre>${promotionText(o.answer)}</pre><p>${T('原始依据：','Original evidence: ')}${promotionText(o.evidence)}</p>${o.citations.map(u=>sourceLink(T('引用来源','Cited source'),u)).join(' · ')}<p>${T('同条件复查只有能取得新观察时才成立；不保证回答变化或由修订引起。','A comparable recheck requires a new observation; it does not prove causality.')}</p>${promotionCanWrite()?button(T('记录同条件复查','Record comparable recheck'),'promotion-recheck',r.id,'small'):''}</details>`;
@@ -1053,7 +1134,7 @@ function promotionReceipt(id,verify=false){
 const promotionPreviousAction=agentAction;
 agentAction=function(id){
  const a=A.data?.actions.find(x=>x.id===id);if(!a?.package.contentCheck)return promotionPreviousAction(id);
- agentModal(()=>T('原批准包与交付结果','Original approval package and delivery'),()=>`${agentStatus(a.status)}<h3>${promotionText(a.package.title)} · v${a.package.artifactRevision}</h3><div class="sourceblock">${promotionText(a.package.channel+' · '+a.package.market+' · '+(A.data.connections.find(c=>c.id===a.package.connectionId)?.name||a.package.connectionId))}<br>${promotionText(a.package.scheduledAt)}</div><pre>${promotionText(a.package.body)}</pre>${(a.package.attachments||[]).map((m,index)=>`<div class="sourceblock" data-review-media="${index}">${promotionText(m.name||m.alt)} · ${promotionText(m.type)}<br>SHA-256 ${promotionText(m.sha256)}${button(T('查看批准素材','Preview prepared media'),'promotion-preview-media',id+'|'+index,'small')}</div>`).join('')}${a.package.media?`<div class="sourceblock">${T('视频文件 / 披露设置','Video file / disclosure settings')}<br>${promotionText(JSON.stringify({media:a.package.media,privacy:a.package.privacy,madeForKids:a.package.madeForKids,syntheticMedia:a.package.syntheticMedia}))}</div>`:''}<details><summary>${T('完整审核参数','Complete approval parameters')}</summary><pre>${promotionText(JSON.stringify(a.package,null,2))}</pre></details><p>${T('产品依据：','Product evidence: ')}${a.package.contentCheck.sources.map(s=>promotionText(s.url||s.id)).join(' · ')}</p><small>SHA-256 ${promotionText(a.payloadHash)}</small>
+ agentModal(()=>T('原批准包与交付结果','Original approval package and delivery'),()=>`${agentStatus(a.status)}<h3>${promotionText(a.package.title)} · v${a.package.artifactRevision}</h3><div class="sourceblock">${promotionText(a.package.channel+' · '+a.package.market+' · '+(A.data.connections.find(c=>c.id===a.package.connectionId)?.name||a.package.connectionId))}<br>${promotionText(a.package.scheduledAt)}</div><pre>${promotionText(a.package.body)}</pre>${(a.package.attachments||[]).map((m,index)=>`<div class="sourceblock" data-review-media="${index}">${promotionText(m.name||m.alt)} · ${promotionText(m.type)}<br>SHA-256 ${promotionText(m.sha256)}${button(T('查看批准素材','Preview prepared media'),'promotion-preview-media',id+'|'+index,'small')}</div>`).join('')}${a.package.media?`<div class="sourceblock">${T('视频文件 / 披露设置','Video file / disclosure settings')}<br>${promotionText(JSON.stringify({media:a.package.media,privacy:a.package.privacy,madeForKids:a.package.madeForKids,syntheticMedia:a.package.syntheticMedia}))}</div>`:''}<details><summary>${T('完整审核参数','Complete approval parameters')}</summary><pre>${promotionText(JSON.stringify(a.package,null,2))}</pre></details>${a.package.bodyHtml?`<details><summary>${T('最终图文 HTML 与公开图片','Final illustrated HTML and public images')}</summary><div class="notice">${T('以下图片已公开托管；发布仍需本包批准。公开可见不代表文章已发布。','Images below are publicly hosted; article publication still requires approval. Public images are not a published article.')}</div>${a.package.attachments.map(m=>`<figure><img src="${promotionText(m.publicUrl)}" alt="${promotionText(m.alt||m.name)}" style="max-width:100%"><figcaption>${promotionText(m.placement?.caption||m.alt||m.name)}</figcaption></figure>`).join('')}<pre>${promotionText(a.package.bodyHtml)}</pre></details>`:''}<p>${T('产品依据：','Product evidence: ')}${a.package.contentCheck.sources.map(s=>promotionText(s.url||s.id)).join(' · ')}</p><small>SHA-256 ${promotionText(a.payloadHash)}</small>
  ${a.status==='pending'&&promotionCanVerify()?`${select('decision',T('决定','Decision'),[['approve',T('批准','Approve')],['reject',T('退回','Reject')]],'approve')}${check('confirmed',T('审核本包正文、素材指纹、来源、账号、市场和时间','Reviewed this copy, media digests, sources, account, market and time'))}`:''}
  ${['handoff','unknown','processing'].includes(a.status)?`<div class="notice">${T('未知结果不能重复提交；回填已发布或未发布都需要核验。旧包按原版本核对，不用新稿代替。','Do not resubmit uncertain writes. Positive and negative claims require verification. Check the old package, not a newer draft.')}</div><div class="row">${A.data.catalog.find(c=>c.id===a.package.provider)?.mode==='manual'?button(T('下载批准图文 / 视频包','Download approved media package'),'promotion-download',id,'small'):promotionCanVerify()?button(T('检查平台状态','Check remote status'),'agent-reconcile',id,'small'):''}${promotionCanWrite()?button(T('提交发布证据','Submit evidence'),'promotion-receipt',id,'small'):''}${promotionCanVerify()?button(T('核验结果','Verify outcome'),'promotion-verify',id,'small'):''}</div>`:''}
  ${A.data.deliveries.filter(d=>d.actionId===id).map(d=>`<div class="sourceblock">${promotionText(d.kind)} · ${promotionText(d.outcome||d.state)}<br>${promotionText(d.evidence||'')}${d.url?sourceLink(T('实际地址','Result URL'),d.url):''}</div>`).join('')}${a.lastError?`<div class="notice">${promotionText(a.lastError.message)}</div>`:''}`,a.status==='pending'&&promotionCanVerify()?async values=>{await api('actions/'+id+'/decide',{...values,payloadHash:a.payloadHash,confirmed:!!values.confirmed});await agentDone();}:null,()=>T('提交审核','Submit decision'));
